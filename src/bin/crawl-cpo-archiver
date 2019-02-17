@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+import argparse
+import logging
+import os
+import random
+import re
+import time
+from datetime import datetime
+from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+
+# Command-line argument parsing {{{
+LOGGING_LEVELS = {
+    "critical": logging.CRITICAL,
+    "error": logging.ERROR,
+    "warning": logging.WARNING,
+    "info": logging.INFO,
+    "debug": logging.DEBUG,
+}
+aparser = argparse.ArgumentParser()
+
+aparser.add_argument(
+    "archive", nargs=1, help="path to the directory storing the archived morgue files"
+)
+aparser.add_argument(
+    "-m",
+    "--morgue",
+    action="store_true",
+    help=("Synchronize morgue file archives. Mutually exclusive with -r"),
+)
+aparser.add_argument(
+    "-r",
+    "--rcfiles",
+    action="store_true",
+    help=("Synchronize RC file archives. Mutually exclusive with -m"),
+)
+aparser.add_argument("-l", "--logging-level", help="Logging level, defaults to info")
+# }}}
+
+REQUEST_INTERVAL = 1
+
+SERVER = "https://crawl.project357.org"
+MORGUE_FRAGMENT = "morgue"
+MORGUE_URL = f"{SERVER}/{MORGUE_FRAGMENT}/"  # trailing / is important in the URL usage
+RCFILE_FRAGMENT = "rc-files"
+RCFILE_URL = f"{SERVER}/{RCFILE_FRAGMENT}"
+EMAIL = "crawl-cpo-archiver@shados.net"
+SRC_URL = "https://github.com/Shados/crawl-cpo-archiver"
+
+REQ_HEADERS = {
+    "User-Agent": f"Crawl-CPO-Archiver (source: {SRC_URL}, user_mailto: {EMAIL})"
+}
+
+
+def main(args):
+    archive = Path(args.archive[0])
+    if args.morgue:
+        archive_folder = Path(f"{archive}/{MORGUE_FRAGMENT}/")
+
+        sync_archive(MORGUE_URL, archive_folder)
+    elif args.rcfiles:
+        archive_folder = Path(f"{archive}/{RCFILE_FRAGMENT}/")
+
+        # RC files are stored by game version
+        # Versions start at 0.15 and go up until we get a 404 back from the
+        # server, additionally there is 'trunk' for the git development
+        # version.
+        # Alternative forks also use trunk's RC files.
+        logging.info("Synchronizing trunk RC files")
+        trunk_url = f"{RCFILE_URL}/trunk/"
+        trunk_archive_folder = archive_folder / "trunk"
+        sync_archive(trunk_url, trunk_archive_folder)
+
+        # Loop and synchronize numeric versions
+        sub_version = 15
+        while True:
+            logging.info(
+                f"Attempting to synchronize RC files for version 0.{sub_version}"
+            )
+            version_url = f"{RCFILE_URL}/0.{sub_version}/"
+            version_archive_folder = archive_folder / f"0.{sub_version}"
+            success = sync_archive(version_url, version_archive_folder)
+            if not success:
+                break
+            sub_version += 1
+
+
+def sync_archive(url, path):
+    # To be polite, sleep briefly before/between requests for index pages --
+    # there's some processing overhead required to generate them
+    time.sleep(REQUEST_INTERVAL * random.uniform(0.5, 1.5))
+    index_req = requests.get(url, headers=REQ_HEADERS)
+    if index_req.status_code != 200:
+        return False
+    index = index_req.text
+
+    item_mtimes = get_html_index_mtimes(index)
+    for item, timestamp in item_mtimes.items():
+        item_path = path / item
+        item_url = url + item
+
+        needs_update = should_update_item(item, item_path, timestamp)
+
+        if not needs_update:
+            continue
+
+        # Download new(er) files and update folder timestamps
+        if item[-1] == "/":
+            # Item is a directory
+            if not item_path.exists():
+                logging.info(f"Directory `{item_path}` did not exist, creating path")
+                item_path.mkdir(parents=True)
+            sync_archive(item_url, item_path)
+            # We've already updated a directory's subfiles above, so we can
+            # just do its timestamp now
+            set_timestamp(item_path, timestamp)
+        else:
+            # Item is a file
+            update_file(item_path, item_url, timestamp)
+            set_timestamp(item_path, timestamp)
+    return True
+
+
+def get_html_index_mtimes(html_string):
+    index = BeautifulSoup(html_string, "html.parser")
+    # Gets the very first non-.. link in the directory listing
+    current_element = index.pre.a.next_sibling
+    item_mtimes = dict()
+    while current_element is not None:
+        if current_element.name == "a":
+            # Parse out the item name
+            item = current_element["href"]
+
+            # Advance to the next element and parse out the modification datetime
+            current_element = current_element.next_sibling
+            date_match = re.match(
+                r"^\s+(\d{2}-\w{3}-\d{4} \d{2}:\d{2})", current_element
+            )
+            date = date_match.groups()[0]
+            date = datetime.strptime(date, "%d-%b-%Y %H:%M")
+            # TODO Log progress based on total line count?
+            item_mtimes[item] = date
+            logging.debug(f"Item '{item}' modification timestamp {date}")
+        else:
+            None
+        current_element = current_element.next_sibling
+    return item_mtimes
+
+
+def should_update_item(item, item_path, timestamp):
+    # Compare the modification time from the HTML agasinst the one on the
+    # file, if it exists
+    if item_path.exists():
+        item_stat = item_path.stat()
+        file_modification = datetime.fromtimestamp(item_stat.st_mtime)
+        if file_modification != timestamp:
+            logging.info(f"Item '{item}' different than the archived path")
+            return True
+        else:
+            logging.debug(f"Item '{item}' the same as the archived path")
+            return False
+    else:
+        logging.info(f"Item '{item}' not archived yet")
+        return True
+
+
+def update_file(path, url, mtime):
+    logging.info(f"Downloading url `{url}` to path `{path}`")
+    with requests.get(url, stream=True, headers=REQ_HEADERS) as req:
+        with open(path, "wb") as file_out:
+            # Download to file in a stream of 8k chunks
+            for chunk in req.iter_content(chunk_size=8192):
+                file_out.write(chunk)
+            file_out.flush()
+
+
+def set_timestamp(path, mtime):
+    mtime = mtime.timestamp()
+    logging.debug(f"Updating timestamp on path `{path}`")
+    times = (mtime, mtime)  # Just set the atime to the mtime
+    os.utime(path, times)
+
+
+if __name__ == "__main__":
+    # Parse CLI arguments
+    cli_args = aparser.parse_args()
+
+    # Do some extended arg checking
+    if not cli_args.morgue and not cli_args.rcfiles:
+        aparser.error("Either --morgue or --rcfiles must be specified!")
+    if cli_args.morgue and cli_args.rcfiles:
+        aparser.error("You cannot specify both --morgue and --rcfiles simultaneously!")
+
+    # Setup default logger
+    logging_level = LOGGING_LEVELS.get(cli_args.logging_level, logging.INFO)
+    logging.basicConfig(
+        level=logging_level,
+        format="[%(filename)s:%(lineno)s:%(funcName)20s()] %(asctime)s %(levelname)s: %(message)s",  # noqa: E501
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    main(cli_args)
+
+# vim: set ft=python :

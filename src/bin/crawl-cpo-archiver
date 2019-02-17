@@ -22,6 +22,11 @@ LOGGING_LEVELS = {
 aparser = argparse.ArgumentParser()
 
 aparser.add_argument(
+    "email",
+    nargs=1,
+    help="email address to specify in the HTTP User-Agent the crawler uses",
+)
+aparser.add_argument(
     "archive", nargs=1, help="path to the directory storing the archived morgue files"
 )
 aparser.add_argument(
@@ -46,16 +51,20 @@ MORGUE_FRAGMENT = "morgue"
 MORGUE_URL = f"{SERVER}/{MORGUE_FRAGMENT}/"  # trailing / is important in the URL usage
 RCFILE_FRAGMENT = "rc-files"
 RCFILE_URL = f"{SERVER}/{RCFILE_FRAGMENT}"
-EMAIL = "crawl-cpo-archiver@shados.net"
 SRC_URL = "https://github.com/Shados/crawl-cpo-archiver"
 
-REQ_HEADERS = {
-    "User-Agent": f"Crawl-CPO-Archiver (source: {SRC_URL}, user_mailto: {EMAIL})"
-}
+REQ_HEADERS = None
 
 
 def main(args):
     archive = Path(args.archive[0])
+    email = args.email[0]
+
+    global REQ_HEADERS
+    REQ_HEADERS = {
+        "User-Agent": f"Crawl-CPO-Archiver (source: {SRC_URL}, user_mailto: {email})"
+    }
+
     if args.morgue:
         archive_folder = Path(f"{archive}/{MORGUE_FRAGMENT}/")
 

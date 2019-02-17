@@ -55,6 +55,8 @@ SRC_URL = "https://github.com/Shados/crawl-cpo-archiver"
 
 REQ_HEADERS = None
 
+UPDATE_COUNT = 0
+
 
 def main(args):
     archive = Path(args.archive[0])
@@ -94,6 +96,7 @@ def main(args):
             if not success:
                 break
             sub_version += 1
+    print(f"Downloaded {UPDATE_COUNT} files")
 
 
 def sync_archive(url, path):
@@ -182,6 +185,8 @@ def update_file(path, url, mtime):
             for chunk in req.iter_content(chunk_size=8192):
                 file_out.write(chunk)
             file_out.flush()
+    global UPDATE_COUNT
+    UPDATE_COUNT += 1
 
 
 def set_timestamp(path, mtime):

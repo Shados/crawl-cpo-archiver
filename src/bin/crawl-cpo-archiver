@@ -104,6 +104,7 @@ def sync_archive(url, path):
     if index_req.status_code != 200:
         return False
     index = index_req.text
+    ensure_dir(path)
 
     item_mtimes = get_html_index_mtimes(index)
     for item, timestamp in item_mtimes.items():
@@ -118,9 +119,7 @@ def sync_archive(url, path):
         # Download new(er) files and update folder timestamps
         if item[-1] == "/":
             # Item is a directory
-            if not item_path.exists():
-                logging.info(f"Directory `{item_path}` did not exist, creating path")
-                item_path.mkdir(parents=True)
+            ensure_dir(item_path)
             sync_archive(item_url, item_path)
             # We've already updated a directory's subfiles above, so we can
             # just do its timestamp now
@@ -190,6 +189,12 @@ def set_timestamp(path, mtime):
     logging.debug(f"Updating timestamp on path `{path}`")
     times = (mtime, mtime)  # Just set the atime to the mtime
     os.utime(path, times)
+
+
+def ensure_dir(dir_path):
+    if not dir_path.exists():
+        logging.debug(f"Directory `{dir_path}` did not exist, creating path")
+        dir_path.mkdir(parents=True)
 
 
 if __name__ == "__main__":
